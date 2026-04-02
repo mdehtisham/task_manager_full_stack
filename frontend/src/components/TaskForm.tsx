@@ -1,4 +1,4 @@
-import { useState, FormEvent } from 'react';
+import { useState, useRef, FormEvent } from 'react';
 import { Task, User } from '../types';
 import { validateTitle, validateDescription, validateDueDate } from '../utils/validation';
 
@@ -37,6 +37,7 @@ export function TaskForm({
     assigned_to: initialValues?.assigned_to || '',
   });
   const [clientErrors, setClientErrors] = useState<Record<string, string>>({});
+  const isSubmittingRef = useRef(false);
 
   const errors = { ...clientErrors, ...serverErrors };
 
@@ -51,6 +52,8 @@ export function TaskForm({
 
   const handleSubmit = async (e: FormEvent) => {
     e.preventDefault();
+    if (isSubmittingRef.current || isLoading) return;
+
     const newErrors: Record<string, string> = {};
 
     const titleErr = validateTitle(values.title);
@@ -67,7 +70,12 @@ export function TaskForm({
       return;
     }
 
-    await onSubmit(values);
+    isSubmittingRef.current = true;
+    try {
+      await onSubmit(values);
+    } finally {
+      isSubmittingRef.current = false;
+    }
   };
 
   const inputClass = (field: string) =>
