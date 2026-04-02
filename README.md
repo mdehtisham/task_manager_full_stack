@@ -18,6 +18,7 @@ A full-stack task management application with role-based access control, built w
 - [Environment Variables](#environment-variables)
 - [Scripts](#scripts)
 - [Design Decisions](#design-decisions)
+- [Industry Patterns](#industry-patterns)
 - [License](#license)
 
 ---
@@ -457,6 +458,172 @@ Additional measures:
 - Type coercion is blocked (string "true" is not accepted as boolean)
 - Unknown fields are stripped from the request body
 - Client-side validation mirrors server-side rules for immediate feedback
+
+---
+
+## Industry Patterns
+
+This project consistently applies the following well-established software engineering patterns across both the backend and frontend.
+
+---
+
+### 1. Layered Architecture (N-Tier)
+
+**Where:** Backend — `routes → controllers → services → database`
+
+Each layer has one responsibility and communicates only with its immediate neighbour. Routes wire middleware and delegate HTTP concerns. Controllers parse requests and format responses. Services own all business logic. No layer crosses its boundary (controllers never write SQL; services never call `res.json()`).
+
+This is the backbone of most production Node.js/Express codebases and maps directly to Clean Architecture's dependency rule.
+
+---
+
+### 2. Repository / Service Layer Pattern
+
+**Where:** `backend/src/services/`
+
+All database access is centralised in service functions. No controller ever constructs a SQL query. Validating business rules (ownership checks, existence checks on `assigned_to`) happens at the service boundary, keeping the database layer as a pure data store.
+
+---
+
+### 3. Middleware Chain Pattern (Chain of Responsibility)
+
+**Where:** `backend/src/middleware/`
+
+Cross-cutting concerns — authentication, authorisation, request validation, error handling, and logging — are implemented as composable Express middleware rather than being duplicated in each route handler. Each middleware does one thing:
+
+| Middleware | Responsibility |
+|---|---|
+| `requestLogger` | Logs every incoming request via Morgan |
+| `authenticate` | Verifies JWT and attaches `req.user` |
+| `authorize` | Guards routes by role |
+| `validate` | Runs validator, throws typed error on failure |
+| `errorHandler` | Single exit point — maps typed errors to HTTP responses |
+
+---
+
+### 4. Typed Error Hierarchy (Exception Hierarchy Pattern)
+
+**Where:** `backend/src/errors/`
+
+Instead of ad-hoc `res.status(400).json(...)` calls scattered across routes, all errors extend a base `AppError` class. The central `errorHandler` middleware inspects the type and maps it deterministically to a status code and consistent `{ error, fields? }` JSON shape. This guarantees every endpoint — regardless of who wrote it — returns the same contract.
+
+```
+AppError (base)
+├── ValidationError   (422) — includes field-level error map
+├── AuthenticationError (401)
+├── ForbiddenError    (403)
+└── NotFoundError     (404)
+```
+
+---
+
+### 5. Role-Based Access Control (RBAC)
+
+**Where:** `backend/src/middleware/authorize.ts`, `backend/src/services/task.service.ts`
+
+Authorization is enforced at two levels: the middleware gate checks the user's role before the route handler runs, and the service layer re-validates ownership (`created_by` / `assigned_to`) for resource-level operations. This defense-in-depth approach means a misconfigured route cannot accidentally expose data that the service would block anyway.
+
+---
+
+### 6. Parameterized Queries (Prepared Statements)
+
+**Where:** Every SQL statement in `backend/src/services/`
+
+Every database interaction uses `better-sqlite3`'s `prepare().run(…)` / `.get(…)` / `.all(…)` with `?` placeholders. No user-supplied value is ever interpolated into a SQL string. This is the canonical defense against SQL injection (OWASP A03).
+
+---
+
+### 7. Migration Runner Pattern
+
+**Where:** `backend/src/database/migrations/`
+
+Schema changes are stored as numbered, immutable `.sql` files (`001_create_users.sql`, `002_create_tasks.sql`). A runner tracks applied migrations in a `_migrations` table and only executes new ones on startup. This is the same pattern used by tools like Flyway, Liquibase, and `node-pg-migrate` — schema is version-controlled alongside code.
+
+---
+
+### 8. Async Error Propagation (asyncHandler Wrapper)
+
+**Where:** `backend/src/utils/asyncHandler.ts`
+
+Express 4 does not catch rejected Promises from `async` route handlers natively. Every handler is wrapped with `asyncHandler`, which catches any thrown error and forwards it to `next(err)`, ensuring the central `errorHandler` receives it. This prevents unhandled Promise rejections from silently crashing the server.
+
+---
+
+### 9. Provider / Context Pattern
+
+**Where:** `frontend/src/context/AuthContext.tsx`
+
+Global authentication state (user, token, `isAdmin`) is held in a React Context provider that wraps the entire app. Components access auth state through the `useAuth()` hook rather than prop-drilling. This is the standard React pattern for truly global, infrequently-changing state and avoids coupling unrelated component trees to auth props.
+
+---
+
+### 10. Custom Hook Pattern (Data Fetching Hooks)
+
+**Where:** `frontend/src/hooks/`
+
+All data fetching, loading state, and error state is encapsulated in dedicated custom hooks (`useTasks`, `useTask`, `useUsers`). Pages and components consume clean, typed values from hooks — they never call `axios` directly. This separates data concerns from rendering concerns, making both independently testable.
+
+---
+
+### 11. Axios Interceptor Pattern
+
+**Where:** `frontend/src/api/client.ts`
+
+A request interceptor attaches the Bearer token to every outgoing request from a single place. A response interceptor handles global `401` responses by clearing auth state and redirecting to `/login`. Neither behaviour is duplicated in individual API call sites — it is expressed once and applies everywhere.
+
+---
+
+### 12. Guard / Protected Route Pattern
+
+**Where:** `frontend/src/components/ProtectedRoute.tsx`
+
+Unauthenticated users are redirected to `/login` at the router level, before any protected page component mounts. This prevents flash-of-unauthenticated-content and keeps auth checks out of individual page components.
+
+---
+
+### 13. Debounce Pattern (Input Optimisation)
+
+**Where:** `frontend/src/components/TaskFilters.tsx`
+
+The search input maintains its own local state and uses a `useEffect` + `setTimeout`/`clearTimeout` debounce of 300ms before propagating the value to the query state. A `useRef` holds the latest callback reference to avoid stale closures without polluting the effect's dependency array. This prevents an API request on every keystroke.
+
+---
+
+### 14. Double-Submit Prevention (Ref Guard Pattern)
+
+**Where:** `frontend/src/components/TaskForm.tsx`
+
+A `useRef` flag (`isSubmittingRef`) is set synchronously at the start of the submit handler and cleared in a `finally` block. Because refs update without triggering a re-render, this guard is effective in the gap between the first click and React's next paint — closing the race window that `disabled={isLoading}` alone cannot cover.
+
+---
+
+### 15. Dual Validation (Client + Server Mirror)
+
+**Where:** `frontend/src/utils/validation.ts` ↔ `backend/src/validators/`
+
+Client-side validators mirror the backend rules exactly. The frontend provides immediate feedback without a network round-trip; the backend enforces the same rules as the authoritative source of truth. Neither layer trusts the other — users get a fast UX, and the API is safe regardless of the client.
+
+---
+
+### 16. Consistent API Response Envelope
+
+**Where:** All API endpoints
+
+Every response — success or failure — follows a strict envelope:
+
+- **Single resource:** `{ data: T }`
+- **List:** `{ data: T[], meta: { page, limit, total, totalPages } }`
+- **Error:** `{ error: string, fields?: Record<string, string> }`
+
+Consumer code (frontend, tests) can always predict the shape without inspecting each endpoint individually.
+
+---
+
+### 17. Seed Data Pattern
+
+**Where:** `backend/src/database/seed.ts`
+
+The seed script is idempotent — it only inserts data when the database is empty (checking `COUNT(*) = 0`). This means `npm run dev` on a fresh clone produces a ready-to-use application with realistic test data (two users, five tasks), without breaking a database that already has data.
 
 ---
 
